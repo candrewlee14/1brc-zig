@@ -2,8 +2,6 @@ const std = @import("std");
 
 const COUNTRIES_ARR_LEN = 256;
 
-const LINES_PER_THREAD = 1024;
-
 const Stat = struct {
     min: f32,
     max: f32,
@@ -114,21 +112,15 @@ pub fn main() !void {
     defer main_ctx.deinit();
     var main_mutex = std.Thread.Mutex{};
 
-    var line_i: usize = 0;
-    var pos: usize = 0;
-    var new_chunk_start: usize = 0;
-    var chunk_i: usize = 0;
-    while (pos < mapped_mem.len) : (line_i += 1) {
-        const newline_pos = std.mem.indexOfScalarPos(u8, mapped_mem, pos, '\n') orelse mapped_mem.len;
-        pos = newline_pos + 1;
-        if (line_i % LINES_PER_THREAD == LINES_PER_THREAD - 1 or pos > mapped_mem.len) {
-            std.log.debug("Got chunk {}!", .{chunk_i});
-            const chunk: []const u8 = mapped_mem[new_chunk_start..pos];
-            new_chunk_start = pos;
-            wg.start();
-            try tp.spawn(threadRun, .{ chunk, chunk_i, &main_ctx, &main_mutex, &wg });
-            chunk_i += 1;
-        }
+    var chunk_start: usize = 0;
+    const job_count = try std.Thread.getCpuCount() - 1;
+    for (0..job_count) |i| {
+        std.log.debug("Got chunk {}!", .{i});
+        const chunk_end = std.mem.indexOfScalarPos(u8, mapped_mem, mapped_mem.len / job_count * i, '\n') orelse mapped_mem.len;
+        const chunk: []const u8 = mapped_mem[chunk_start..chunk_end];
+        chunk_start = chunk_end + 1;
+        wg.start();
+        try tp.spawn(threadRun, .{ chunk, i, &main_ctx, &main_mutex, &wg });
     }
     std.log.debug("Waiting and working", .{});
     tp.waitAndWork(&wg);
