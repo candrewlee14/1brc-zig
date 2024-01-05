@@ -2,18 +2,92 @@ const std = @import("std");
 
 const COUNTRIES_ARR_LEN = 256;
 
+const LINES_PER_THREAD = 1024;
+
 const Stat = struct {
     min: f32,
     max: f32,
     sum: f32,
     count: u32,
+
+    pub fn mergeIn(self: *Stat, other: Stat) void {
+        self.min = @min(self.min, other.min);
+        self.max = @max(self.max, other.max);
+        self.sum += other.sum;
+        self.count += other.count;
+    }
+    pub fn addItem(self: *Stat, item: f32) void {
+        self.min = @min(self.min, item);
+        self.max = @max(self.max, item);
+        self.sum += item;
+        self.count += 1;
+    }
 };
+
+const WorkerCtx = struct {
+    map: std.StringHashMap(Stat),
+    countries: std.ArrayList([]const u8),
+
+    pub fn init(allocator: std.mem.Allocator) !WorkerCtx {
+        var self: WorkerCtx = undefined;
+        self.map = std.StringHashMap(Stat).init(allocator);
+        self.countries = try std.ArrayList([]const u8).initCapacity(allocator, COUNTRIES_ARR_LEN);
+        return self;
+    }
+    pub fn deinit(self: *WorkerCtx) void {
+        self.map.deinit();
+        self.countries.deinit();
+    }
+};
+
+fn threadRun(
+    chunk: []const u8,
+    chunk_idx: usize,
+    main_ctx: *WorkerCtx,
+    main_mutex: *std.Thread.Mutex,
+    wg: *std.Thread.WaitGroup,
+) void {
+    defer wg.finish();
+    var ctx = WorkerCtx.init(std.heap.c_allocator) catch unreachable;
+    defer ctx.deinit();
+    std.log.debug("Running thread {}!", .{chunk_idx});
+
+    var line_it = std.mem.splitScalar(u8, chunk, '\n');
+    while (line_it.next()) |line| {
+        if (line.len == 0) continue;
+
+        var chunk_it = std.mem.splitScalar(u8, line, ';');
+        const city = chunk_it.next().?;
+        const num_str = chunk_it.next().?;
+        const num = std.fmt.parseFloat(f32, num_str) catch unreachable;
+        const entry = ctx.map.getOrPut(city) catch unreachable;
+        if (entry.found_existing) {
+            entry.value_ptr.addItem(num);
+        } else {
+            ctx.countries.append(entry.key_ptr.*) catch unreachable;
+            entry.value_ptr.* = Stat{ .min = num, .max = num, .sum = num, .count = 1 };
+        }
+    }
+    for (ctx.countries.items) |country| {
+        const stat = ctx.map.get(country).?;
+        main_mutex.lock();
+        if (main_ctx.map.getPtr(country)) |main_stat| {
+            main_stat.mergeIn(stat);
+        } else {
+            main_ctx.countries.append(country) catch unreachable;
+            main_ctx.map.put(country, stat) catch unreachable;
+        }
+        main_mutex.unlock();
+    }
+    std.log.debug("Finished thread {}!", .{chunk_idx});
+}
 
 fn strLessThan(_: void, a: []const u8, b: []const u8) bool {
     return std.mem.order(u8, a, b) == std.math.Order.lt;
 }
 
 pub fn main() !void {
+    std.log.debug("Starting!", .{});
     var args = try std.process.argsWithAllocator(std.heap.c_allocator);
     defer args.deinit();
     _ = args.skip(); // skip program name
@@ -32,31 +106,37 @@ pub fn main() !void {
     );
     defer std.os.munmap(mapped_mem);
 
-    var line_it = std.mem.splitScalar(u8, mapped_mem, '\n');
-    var map = std.StringHashMap(Stat).init(std.heap.c_allocator);
-    defer map.deinit();
-    var countries = try std.ArrayList([]const u8).initCapacity(std.heap.c_allocator, COUNTRIES_ARR_LEN);
-    while (line_it.next()) |line| {
-        if (line.len == 0) continue;
-        var chunk_it = std.mem.splitScalar(u8, line, ';');
-        const city = chunk_it.next().?;
-        const num_str = chunk_it.next().?;
-        const num = try std.fmt.parseFloat(f32, num_str);
-        const entry = try map.getOrPut(city);
-        if (entry.found_existing) {
-            entry.value_ptr.min = @min(entry.value_ptr.min, num);
-            entry.value_ptr.max = @max(entry.value_ptr.max, num);
-            entry.value_ptr.sum += num;
-            entry.value_ptr.count += 1;
-        } else {
-            try countries.append(entry.key_ptr.*);
-            entry.value_ptr.* = Stat{ .min = num, .max = num, .sum = num, .count = 1 };
+    var tp: std.Thread.Pool = undefined;
+    try tp.init(.{ .allocator = std.heap.c_allocator });
+    var wg = std.Thread.WaitGroup{};
+
+    var main_ctx = try WorkerCtx.init(std.heap.c_allocator);
+    defer main_ctx.deinit();
+    var main_mutex = std.Thread.Mutex{};
+
+    var line_i: usize = 0;
+    var pos: usize = 0;
+    var new_chunk_start: usize = 0;
+    var chunk_i: usize = 0;
+    while (pos < mapped_mem.len) : (line_i += 1) {
+        const newline_pos = std.mem.indexOfScalarPos(u8, mapped_mem, pos, '\n') orelse mapped_mem.len;
+        pos = newline_pos + 1;
+        if (line_i % LINES_PER_THREAD == LINES_PER_THREAD - 1 or pos > mapped_mem.len) {
+            std.log.debug("Got chunk {}!", .{chunk_i});
+            const chunk: []const u8 = mapped_mem[new_chunk_start..pos];
+            new_chunk_start = pos;
+            wg.start();
+            try tp.spawn(threadRun, .{ chunk, chunk_i, &main_ctx, &main_mutex, &wg });
+            chunk_i += 1;
         }
     }
+    std.log.debug("Waiting and working", .{});
+    tp.waitAndWork(&wg);
+    std.log.debug("Finished waiting and working", .{});
 
-    std.mem.sortUnstable([]const u8, countries.items, {}, strLessThan);
-    for (countries.items) |country| {
-        const stat = map.get(country).?;
+    std.mem.sortUnstable([]const u8, main_ctx.countries.items, {}, strLessThan);
+    for (main_ctx.countries.items) |country| {
+        const stat = main_ctx.map.get(country).?;
         const avg = stat.sum / @as(f32, @floatFromInt(stat.count));
         std.debug.print("{s}: min: {d:.3}, max: {d:.3}, avg: {d:.3}\n", .{ country, stat.min, stat.max, avg });
     }
