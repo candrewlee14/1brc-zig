@@ -14,7 +14,11 @@ fn strLessThan(_: void, a: []const u8, b: []const u8) bool {
 }
 
 pub fn main() !void {
-    const file = try std.fs.cwd().openFile("measurements.txt", .{ .mode = .read_only });
+    var args = try std.process.argsWithAllocator(std.heap.c_allocator);
+    defer args.deinit();
+    _ = args.skip(); // skip program name
+    const file_name = args.next() orelse "measurements.txt";
+    const file = try std.fs.cwd().openFile(file_name, .{ .mode = .read_only });
     defer file.close();
     //
     const file_len: usize = std.math.cast(usize, try file.getEndPos()) orelse std.math.maxInt(usize);
@@ -33,9 +37,7 @@ pub fn main() !void {
     defer map.deinit();
     var countries = try std.ArrayList([]const u8).initCapacity(std.heap.c_allocator, COUNTRIES_ARR_LEN);
     while (line_it.next()) |line| {
-        if (line.len == 0) {
-            continue;
-        }
+        if (line.len == 0) continue;
         var chunk_it = std.mem.splitScalar(u8, line, ';');
         const city = chunk_it.next().?;
         const num_str = chunk_it.next().?;
@@ -56,7 +58,7 @@ pub fn main() !void {
     for (countries.items) |country| {
         const stat = map.get(country).?;
         const avg = stat.sum / @as(f32, @floatFromInt(stat.count));
-        std.debug.print("{s}: min: {d}, max: {d}, avg: {d}\n", .{ country, stat.min, stat.max, avg });
+        std.debug.print("{s}: min: {d:.3}, max: {d:.3}, avg: {d:.3}\n", .{ country, stat.min, stat.max, avg });
     }
 }
 
