@@ -25,9 +25,13 @@ pub fn build(b: *std.Build) void {
 
     const create_sample_exe = b.addExecutable(.{
         .name = "run-create-sample",
-        .root_source_file = .{ .path = "src/create-sample.c" },
+        .root_source_file = null,
         .target = target,
         .optimize = optimize,
+    });
+    create_sample_exe.addCSourceFile(.{
+        .file = .{ .path = "src/create-sample.c" },
+        .flags = &[_][]const u8{ "-Wall", "-Wextra", "-Werror" },
     });
     create_sample_exe.linkLibC();
 

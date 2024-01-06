@@ -1,6 +1,6 @@
 const std = @import("std");
 
-const COUNTRIES_ARR_LEN = 256;
+const MAP_CAPACITY = 512 * 2 * 2;
 
 const T = i32;
 const F = f32;
@@ -32,7 +32,8 @@ const WorkerCtx = struct {
     pub fn init(allocator: std.mem.Allocator) !WorkerCtx {
         var self: WorkerCtx = undefined;
         self.map = std.StringHashMap(Stat).init(allocator);
-        self.countries = try std.ArrayList([]const u8).initCapacity(allocator, COUNTRIES_ARR_LEN);
+        try self.map.ensureTotalCapacity(MAP_CAPACITY);
+        self.countries = std.ArrayList([]const u8).init(allocator);
         return self;
     }
     pub fn deinit(self: *WorkerCtx) void {
