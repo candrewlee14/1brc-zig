@@ -2,10 +2,13 @@ const std = @import("std");
 
 const COUNTRIES_ARR_LEN = 256;
 
+const T = i32;
+const F = f32;
+
 const Stat = struct {
-    min: f32,
-    max: f32,
-    sum: f32,
+    min: F,
+    max: F,
+    sum: F,
     count: u32,
 
     pub fn mergeIn(self: *Stat, other: Stat) void {
@@ -14,7 +17,7 @@ const Stat = struct {
         self.sum += other.sum;
         self.count += other.count;
     }
-    pub fn addItem(self: *Stat, item: f32) void {
+    pub fn addItem(self: *Stat, item: F) void {
         self.min = @min(self.min, item);
         self.max = @max(self.max, item);
         self.sum += item;
@@ -38,13 +41,14 @@ const WorkerCtx = struct {
     }
 };
 
-inline fn parseSimpleFloat(chunk: []const u8, pos: *usize) f32 {
-    const is_neg = chunk[pos.*] == '-';
+inline fn parseSimpleFloat(chunk: []const u8, pos: *usize) F {
     var inum: i32 = 0;
-    inline for (0..5) |i| {
-        const idx = pos.* + i + @intFromBool(is_neg);
+    var is_neg: bool = false;
+    for (0..6) |i| {
+        const idx = pos.* + i;
         const item = chunk[idx];
         switch (item) {
+            '-' => is_neg = true,
             '0'...'9' => {
                 inum *= 10;
                 inum += item - '0';
@@ -126,6 +130,7 @@ pub fn main() !void {
         file.handle,
         0,
     );
+    try std.os.madvise(mapped_mem.ptr, file_len, std.os.MADV.HUGEPAGE);
     defer std.os.munmap(mapped_mem);
 
     var tp: std.Thread.Pool = undefined;
@@ -139,29 +144,34 @@ pub fn main() !void {
     var chunk_start: usize = 0;
     const job_count = try std.Thread.getCpuCount() - 1;
     for (0..job_count) |i| {
-        const chunk_end = std.mem.indexOfScalarPos(u8, mapped_mem, mapped_mem.len / job_count * i, '\n') orelse mapped_mem.len;
+        const search_start = mapped_mem.len / job_count * (i + 1);
+        const chunk_end = std.mem.indexOfScalarPos(u8, mapped_mem, search_start, '\n') orelse mapped_mem.len;
         const chunk: []const u8 = mapped_mem[chunk_start..chunk_end];
         chunk_start = chunk_end + 1;
         wg.start();
         try tp.spawn(threadRun, .{ chunk, i, &main_ctx, &main_mutex, &wg });
+        if (chunk_start >= mapped_mem.len) break;
     }
     std.log.debug("Waiting and working", .{});
     tp.waitAndWork(&wg);
     std.log.debug("Finished waiting and working", .{});
 
     std.mem.sortUnstable([]const u8, main_ctx.countries.items, {}, strLessThan);
-    for (main_ctx.countries.items) |country| {
+    std.debug.print("{{", .{});
+    for (main_ctx.countries.items, 0..) |country, i| {
         const stat = main_ctx.map.get(country).?;
-        const avg = stat.sum / @as(f32, @floatFromInt(stat.count));
-        std.debug.print("{s}: min: {d:.3}, max: {d:.3}, avg: {d:.3}\n", .{ country, stat.min, stat.max, avg });
+        const avg = stat.sum / @as(F, @floatFromInt(stat.count));
+        std.debug.print("{s}={d:.1}/{d:.1}/{d:.1}", .{ country, stat.min, avg, stat.max });
+        if (i + 1 != main_ctx.countries.items.len) std.debug.print(", ", .{});
     }
+    std.debug.print("}}\n", .{});
 }
 
 test "parseSimpleFloat - pos 3 digs" {
     var pos: usize = 0;
     const str = "12.1\n";
     const num = parseSimpleFloat(str, &pos);
-    try std.testing.expectEqual(@as(f32, 12.1), num);
+    try std.testing.expectEqual(@as(F, 12.1), num);
     try std.testing.expectEqual(str.len, pos);
 }
 
@@ -169,7 +179,7 @@ test "parseSimpleFloat - neg 3 digs" {
     var pos: usize = 0;
     const str = "-25.8\n";
     const num = parseSimpleFloat(str, &pos);
-    try std.testing.expectEqual(@as(f32, -25.8), num);
+    try std.testing.expectEqual(@as(F, -25.8), num);
     try std.testing.expectEqual(str.len, pos);
 }
 
@@ -177,7 +187,7 @@ test "parseSimpleFloat - pos 2 digs" {
     var pos: usize = 0;
     const str = "1.9\n";
     const num = parseSimpleFloat(str, &pos);
-    try std.testing.expectEqual(@as(f32, 1.9), num);
+    try std.testing.expectEqual(@as(F, 1.9), num);
     try std.testing.expectEqual(str.len, pos);
 }
 
@@ -185,6 +195,6 @@ test "parseSimpleFloat - neg 2 digs" {
     var pos: usize = 0;
     const str = "-1.9\n";
     const num = parseSimpleFloat(str, &pos);
-    try std.testing.expectEqual(@as(f32, -1.9), num);
+    try std.testing.expectEqual(@as(F, -1.9), num);
     try std.testing.expectEqual(str.len, pos);
 }
