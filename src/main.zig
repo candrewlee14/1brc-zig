@@ -38,6 +38,29 @@ const WorkerCtx = struct {
     }
 };
 
+inline fn parseSimpleFloat(chunk: []const u8, pos: *usize) f32 {
+    const is_neg = chunk[pos.*] == '-';
+    var inum: i32 = 0;
+    inline for (0..5) |i| {
+        const idx = pos.* + i + @intFromBool(is_neg);
+        const item = chunk[idx];
+        switch (item) {
+            '0'...'9' => {
+                inum *= 10;
+                inum += item - '0';
+            },
+            '\n' => {
+                pos.* = idx + 1;
+                break;
+            },
+            else => {},
+        }
+    }
+    inum *= if (is_neg) -1 else 1;
+    const num: f32 = @as(f32, @floatFromInt(inum)) / 10;
+    return num;
+}
+
 fn threadRun(
     chunk: []const u8,
     chunk_idx: usize,
@@ -49,25 +72,26 @@ fn threadRun(
     var ctx = WorkerCtx.init(std.heap.c_allocator) catch unreachable;
     defer ctx.deinit();
     std.log.debug("Running thread {}!", .{chunk_idx});
-
-    var line_it = std.mem.splitScalar(u8, chunk, '\n');
-    while (line_it.next()) |line| {
-        if (line.len == 0) continue;
-
-        var chunk_it = std.mem.splitScalar(u8, line, ';');
-        const city = chunk_it.next().?;
-        const num_str = chunk_it.next().?;
-        const num = std.fmt.parseFloat(f32, num_str) catch unreachable;
+    var pos: usize = 0;
+    while (pos < chunk.len) {
+        const new_pos = std.mem.indexOfScalarPos(u8, chunk, pos, ';') orelse chunk.len;
+        const city = chunk[pos..new_pos];
+        pos = new_pos + 1;
+        // the rest of the line is a (optional negative) float with 1-2 digits then 1 decimal place.
+        // -23.1, 1.2, -8.5
+        const num = parseSimpleFloat(chunk, &pos);
         const entry = ctx.map.getOrPut(city) catch unreachable;
         if (entry.found_existing) {
             entry.value_ptr.addItem(num);
         } else {
-            ctx.countries.append(entry.key_ptr.*) catch unreachable;
             entry.value_ptr.* = Stat{ .min = num, .max = num, .sum = num, .count = 1 };
         }
     }
-    for (ctx.countries.items) |country| {
-        const stat = ctx.map.get(country).?;
+
+    var it = ctx.map.iterator();
+    while (it.next()) |entry| {
+        const country = entry.key_ptr.*;
+        const stat = entry.value_ptr.*;
         main_mutex.lock();
         if (main_ctx.map.getPtr(country)) |main_stat| {
             main_stat.mergeIn(stat);
@@ -115,7 +139,6 @@ pub fn main() !void {
     var chunk_start: usize = 0;
     const job_count = try std.Thread.getCpuCount() - 1;
     for (0..job_count) |i| {
-        std.log.debug("Got chunk {}!", .{i});
         const chunk_end = std.mem.indexOfScalarPos(u8, mapped_mem, mapped_mem.len / job_count * i, '\n') orelse mapped_mem.len;
         const chunk: []const u8 = mapped_mem[chunk_start..chunk_end];
         chunk_start = chunk_end + 1;
@@ -134,9 +157,34 @@ pub fn main() !void {
     }
 }
 
-test "simple test" {
-    var list = std.ArrayList(i32).init(std.testing.allocator);
-    defer list.deinit(); // try commenting this out and see if zig detects the memory leak!
-    try list.append(42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
+test "parseSimpleFloat - pos 3 digs" {
+    var pos: usize = 0;
+    const str = "12.1\n";
+    const num = parseSimpleFloat(str, &pos);
+    try std.testing.expectEqual(@as(f32, 12.1), num);
+    try std.testing.expectEqual(str.len, pos);
+}
+
+test "parseSimpleFloat - neg 3 digs" {
+    var pos: usize = 0;
+    const str = "-25.8\n";
+    const num = parseSimpleFloat(str, &pos);
+    try std.testing.expectEqual(@as(f32, -25.8), num);
+    try std.testing.expectEqual(str.len, pos);
+}
+
+test "parseSimpleFloat - pos 2 digs" {
+    var pos: usize = 0;
+    const str = "1.9\n";
+    const num = parseSimpleFloat(str, &pos);
+    try std.testing.expectEqual(@as(f32, 1.9), num);
+    try std.testing.expectEqual(str.len, pos);
+}
+
+test "parseSimpleFloat - neg 2 digs" {
+    var pos: usize = 0;
+    const str = "-1.9\n";
+    const num = parseSimpleFloat(str, &pos);
+    try std.testing.expectEqual(@as(f32, -1.9), num);
+    try std.testing.expectEqual(str.len, pos);
 }
