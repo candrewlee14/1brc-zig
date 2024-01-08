@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 
 const MAP_CAPACITY = 512 * 2 * 2;
 
@@ -131,8 +132,8 @@ pub fn main() !void {
         file.handle,
         0,
     );
-    try std.os.madvise(mapped_mem.ptr, file_len, std.os.MADV.HUGEPAGE);
     defer std.os.munmap(mapped_mem);
+    if (builtin.os.tag == .linux) try std.os.madvise(mapped_mem.ptr, file_len, std.os.MADV.HUGEPAGE);
 
     var tp: std.Thread.Pool = undefined;
     try tp.init(.{ .allocator = std.heap.c_allocator });
